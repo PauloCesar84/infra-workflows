@@ -1,15 +1,20 @@
-# Fabrica de imagem REUTILIZAVEL do pool (k3s) - versao v2.
+# Fabrica de imagem REUTILIZAVEL do pool (k3s) - versao v3.
 #
 # v2 (2026-10-30): publica no REGISTRY DO POOL (registry.pauloleitte.com.br), privado, com a
-# credencial do robot passada pelo produto como segredo. A v1 publicava no ghcr.io com o
-# GITHUB_TOKEN; ela continua existindo para quem ja aponta para la - a tag v1 nao se move.
+# credencial do robot passada pelo produto como segredo.
+# v3 (2026-10-30): FECHA O CICLO. Se o produto informar `manifesto`, a fabrica commita o SHA novo
+# no manifesto - e ai o Argo aplica sozinho. Sem esse passo, publicar imagem nao muda o site (era a
+# "cola" manual). A v2 continua existindo para quem nao quer esse commit automatico - nada se move.
 #
 # CHAMADA (no repositorio do produto):
+#   permissions:
+#     contents: write        # a v3 precisa disto para commitar o manifesto
 #   jobs:
 #     imagem:
-#       uses: PauloCesar84/infra-workflows/.github/workflows/imagem-produto.yml@v2
+#       uses: PauloCesar84/infra-workflows/.github/workflows/imagem-produto.yml@v3
 #       with:
 #         imagem: registry.pauloleitte.com.br/<produto>
+#         manifesto: deploy/deployment.yaml    # caminho no MESMO repositorio; vazio = nao commita
 #       secrets:
 #         registry_username: ${{ secrets.REGISTRY_USER }}
 #         registry_password: ${{ secrets.REGISTRY_PASSWORD }}
@@ -44,6 +49,11 @@ on:
         required: false
         type: string
         default: "linux/amd64"
+      manifesto:
+        description: "Manifesto (no MESMO repositorio) que aponta a imagem; vazio = nao commita"
+        required: false
+        type: string
+        default: ""
     secrets:
       registry_username:
         description: "Usuario do registry (conta robot)"
@@ -53,7 +63,8 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # write por causa da cola (commitar o SHA novo no manifesto). Sem `manifesto`, o write nao e usado.
+  contents: write
 
 jobs:
   construir:
@@ -89,3 +100,29 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Publicar a imagem nova no manifesto (a cola do GitOps)
+        # Sem este passo, publicar imagem NAO muda o site: e exatamente o pedaco que o Argo, sozinho,
+        # nao faz. Com ele, um `push` no GitOps fica completo: constroi, publica e aponta - o Argo
+        # aplica em seguida (~3 min, ou instantaneo com webhook).
+        if: ${{ inputs.manifesto != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          alvo="${{ inputs.manifesto }}"
+          if [ ! -f "$alvo" ]; then
+            echo "::error::manifesto '$alvo' nao existe neste repositorio"
+            exit 1
+          fi
+          git config user.name  "fabrica-de-imagem"
+          git config user.email "fabrica-de-imagem@users.noreply.github.com"
+          sed -i -E "s#^([[:space:]]*image:[[:space:]]*)${{ inputs.imagem }}:[^[:space:]]*#\1${{ inputs.imagem }}:${{ github.sha }}#" "$alvo"
+          if git diff --quiet -- "$alvo"; then
+            echo "O manifesto ja apontava para este commit - nada a fazer."
+            exit 0
+          fi
+          git add "$alvo"
+          # [skip ci] impede que este commit dispare a fabrica de novo (nada de laco infinito).
+          git commit -m "manifesto: no ar aponta para a imagem do commit ${{ github.sha }} [skip ci]"
+          git push || { git pull --rebase --autostash && git push; }
+          echo "Manifesto apontado para ${{ github.sha }} - o Argo aplica agora."
