@@ -1,27 +1,34 @@
-# Fabrica de imagem REUTILIZAVEL do pool (k3s).
+# Fabrica de imagem REUTILIZAVEL do pool (k3s) - versao v2.
 #
-# Vive aqui (repositorio central) e e CHAMADA por cada produto, que fica com um chamador de ~6 linhas:
+# v2 (2026-10-30): publica no REGISTRY DO POOL (registry.pauloleitte.com.br), privado, com a
+# credencial do robot passada pelo produto como segredo. A v1 publicava no ghcr.io com o
+# GITHUB_TOKEN; ela continua existindo para quem ja aponta para la - a tag v1 nao se move.
 #
+# CHAMADA (no repositorio do produto):
 #   jobs:
 #     imagem:
-#       uses: PauloCesar84/infra-workflows/.github/workflows/imagem-produto.yml@v1
+#       uses: PauloCesar84/infra-workflows/.github/workflows/imagem-produto.yml@v2
 #       with:
-#         imagem: ghcr.io/paulocesar84/<produto>
+#         imagem: registry.pauloleitte.com.br/<produto>
+#       secrets:
+#         registry_username: ${{ secrets.REGISTRY_USER }}
+#         registry_password: ${{ secrets.REGISTRY_PASSWORD }}
 #
-# O que ela faz: constroi a imagem DO COMMIT e publica com a tag sendo o SHA. NUNCA publica `latest`:
-# cada versao no ar tem de apontar para um commit - tag movel quebra o rollback por commit.
-#
-# Versao: v1 (2026-10-30). Ao mudar este arquivo, crie v2 em vez de mover a v1 - quem chama fixa a
-# versao, e mover a tag troca o build de quem ja estava funcionando.
+# A tag da imagem e o SHA do commit. NUNCA se publica `latest`: cada versao no ar aponta para um commit.
 name: imagem-produto
 
 on:
   workflow_call:
     inputs:
       imagem:
-        description: "Endereco no registry, sem tag (ex.: ghcr.io/paulocesar84/kisaber-site)"
+        description: "Endereco no registry, sem tag (ex.: registry.pauloleitte.com.br/kisaber-site)"
         required: true
         type: string
+      registry:
+        description: "Host do registry, sem https"
+        required: false
+        type: string
+        default: "registry.pauloleitte.com.br"
       contexto:
         description: "Diretorio de contexto do build"
         required: false
@@ -37,10 +44,16 @@ on:
         required: false
         type: string
         default: "linux/amd64"
+    secrets:
+      registry_username:
+        description: "Usuario do registry (conta robot)"
+        required: true
+      registry_password:
+        description: "Senha do registry (conta robot)"
+        required: true
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   construir:
@@ -52,13 +65,14 @@ jobs:
       - name: Preparar o construtor (buildx)
         uses: docker/setup-buildx-action@v3
 
-      - name: Entrar no registry com o token da propria execucao
-        # Nao usa token pessoal parado: o GITHUB_TOKEN nasce e morre com a execucao.
+      - name: Entrar no registry do pool
+        # Credencial vem do produto (segredos do repositorio). Nao e token pessoal nem token de plataforma:
+        # e a conta robot do registry, que e nossa.
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.registry_username }}
+          password: ${{ secrets.registry_password }}
 
       - name: Construir e empurrar (tag = SHA do commit)
         uses: docker/build-push-action@v6
